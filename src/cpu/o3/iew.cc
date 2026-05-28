@@ -50,6 +50,7 @@
 #include "cpu/checker/cpu.hh"
 #include "cpu/o3/dyn_inst.hh"
 #include "cpu/o3/fu_pool.hh"
+#include "cpu/o3/inst_queue.hh"
 #include "cpu/o3/limits.hh"
 #include "cpu/timebuf.hh"
 #include "debug/Activity.hh"
@@ -87,6 +88,10 @@ IEW::IEW(CPU *_cpu, const BaseO3CPUParams &params)
       wbNumInst(0),
       wbCycle(0),
       wbWidth(params.wbWidth),
+      pregWBWidth(params.pregWBWidth),
+      vregWBWidth(params.vregWBWidth),
+      eregWBWidth(params.eregWBWidth),
+      numExecutingIntDiv(0),
       numThreads(params.numThreads),
       iewStats(cpu)
 {
@@ -198,7 +203,23 @@ IEW::IEWStats::IEWStats(CPU *cpu)
       ADD_STAT(wbFanout,
                statistics::units::Rate<statistics::units::Count,
                                        statistics::units::Count>::get(),
-               "Average fanout of values written-back")
+               "Average fanout of values written-back"),
+      ADD_STAT(stallCycles, statistics::units::Cycle::get(),
+               "Cycles spent in each stall type (C910 classification)"),
+      ADD_STAT(backendStallCycles, statistics::units::Cycle::get(),
+               "Backend stall cycles (idu_hpcp_backend_stall)"),
+      ADD_STAT(fenceSyncCount, statistics::units::Count::get(),
+               "FENCE synchronization events"),
+      ADD_STAT(pipeIssueCount, statistics::units::Count::get(),
+               "Per-pipe issue count (C910 HPCP: idu_hpcp_rf_pipe[0:7]_inst_vld)"),
+      ADD_STAT(issueLatchFail, statistics::units::Count::get(),
+               "Per-pipe issue latch failure count"),
+      ADD_STAT(iqEmptyCycles, statistics::units::Cycle::get(),
+               "Cycles with IQ empty (idu_had_iq_empty)"),
+      ADD_STAT(pipelineEmptyCycles, statistics::units::Cycle::get(),
+               "Cycles with pipeline empty (idu_had_pipeline_empty)"),
+      ADD_STAT(pipelineStallCycles, statistics::units::Cycle::get(),
+               "Cycles with pipeline stall (idu_had_pipe_stall)")
 {
     dispatchStatus.init(ThreadStatusMax)
         .flags(statistics::pdf | statistics::nozero);
@@ -236,6 +257,44 @@ IEW::IEWStats::IEWStats(CPU *cpu)
     wbFanout
         .flags(statistics::total);
     wbFanout = producerInst / consumerInst;
+
+    // C910 stall type counters
+    static const char* stallNames[] = {
+        "no_stall", "rob_full", "iq_full", "vmb_full",
+        "type_stall", "dispatch_stall", "is_stall",
+        "div_stall", "vdiv_stall", "backend_stall"
+    };
+    stallCycles.init(NUM_STALL_TYPES)
+        .flags(statistics::pdf | statistics::nozero);
+    for (int i = 0; i < NUM_STALL_TYPES; ++i) {
+        stallCycles.subname(i, stallNames[i]);
+    }
+    stallCycles.subdesc(0, "Cycles with no stall");
+    stallCycles.subdesc(1, "Cycles stalled by ROB full");
+    stallCycles.subdesc(2, "Cycles stalled by IQ full");
+    stallCycles.subdesc(3, "Cycles stalled by VMB full");
+    stallCycles.subdesc(4, "Cycles stalled by FENCE/barrier type stall");
+    stallCycles.subdesc(5, "Cycles stalled by dispatch (composite)");
+    stallCycles.subdesc(6, "Cycles stalled by IS-level total stall");
+    stallCycles.subdesc(7, "Cycles stalled by DIV unit writeback");
+    stallCycles.subdesc(8, "Cycles stalled by vector DIV writeback");
+    stallCycles.subdesc(9, "Cycles stalled by backend execution units");
+
+    // C910 HPCP pipe issue counters
+    static const char* pipeNames[] = {
+        "pipe0_iu_alu", "pipe1_iu_alu_mla", "pipe2_bju", "pipe3_lsu_load",
+        "pipe4_lsu_special", "pipe5_lsu_store", "pipe6_vfpu_alu", "pipe7_vfpu_ma"
+    };
+    pipeIssueCount.init(8)
+        .flags(statistics::total);
+    for (int i = 0; i < 8; ++i) {
+        pipeIssueCount.subname(i, pipeNames[i]);
+    }
+    issueLatchFail.init(8)
+        .flags(statistics::total);
+    for (int i = 0; i < 8; ++i) {
+        issueLatchFail.subname(i, pipeNames[i]);
+    }
 }
 
 IEW::IEWStats::ExecutedInstStats::ExecutedInstStats(CPU *cpu)
@@ -438,6 +497,10 @@ void
 IEW::squash(ThreadID tid)
 {
     DPRINTF(IEW, "[tid:%i] Squashing all instructions.\n", tid);
+
+    // C910: Log flush type for debugging
+    FlushType ft = fromCommit->commitInfo[tid].flushType;
+    DPRINTF(IEW, "[tid:%i] Flush type: %s\n", tid, to_string(ft));
 
     // Tell the IQ to start squashing.
     instQueue.squash(tid);
@@ -714,6 +777,93 @@ IEW::checkStall(ThreadID tid)
     return ret_val;
 }
 
+IEW::StallType
+IEW::detectStallType(ThreadID tid)
+{
+    // C910 stall type detection: checks in priority order
+    // ctrl_is_dis_stall = ctrl_is_rob_full || ctrl_is_iq_full || ctrl_is_vmb_full
+    // ctrl_is_stall = ctrl_is_dis_stall || is_dis_type_stall
+
+    if (fromCommit->commitInfo[tid].robSquashing) {
+        return ROB_FULL;
+    }
+
+    if (isROBFull(tid)) {
+        return ROB_FULL;
+    }
+
+    if (isIQFull(tid)) {
+        return IQ_FULL;
+    }
+
+    if (isVMBFull(tid)) {
+        return VMB_FULL;
+    }
+
+    if (isTypeStall(tid)) {
+        return TYPE_STALL;
+    }
+
+    if (isDivStall(tid)) {
+        return DIV_STALL;
+    }
+
+    return NO_STALL;
+}
+
+bool
+IEW::isROBFull(ThreadID tid)
+{
+    return fromCommit->commitInfo[tid].robSquashing ||
+           fromCommit->commitInfo[tid].freeROBEntries == 0;
+}
+
+bool
+IEW::isIQFull(ThreadID tid)
+{
+    return instQueue.isFull(tid);
+}
+
+bool
+IEW::isIQFullByType(ThreadID tid, IQType type)
+{
+    return instQueue.isFullByType(type, tid);
+}
+
+bool
+IEW::isVMBFull(ThreadID tid)
+{
+    return instQueue.isFullByType(IQType::VMB, tid);
+}
+
+bool
+IEW::isTypeStall(ThreadID tid)
+{
+    // Check if there's a barrier/FENCE blocking subsequent instructions
+    // This is detected by checking if any barrier instruction is in the IQ
+    // and hasn't completed yet.
+    return false; // Placeholder — would need IQ barrier tracking
+}
+
+bool
+IEW::isDispatchStall(ThreadID tid)
+{
+    // ctrl_is_dis_stall = ctrl_is_rob_full || ctrl_is_iq_full || ctrl_is_vmb_full
+    return isROBFull(tid) || isIQFull(tid) || isVMBFull(tid);
+}
+
+bool
+IEW::isDivStall(ThreadID tid)
+{
+    // DIV_STALL: IntDiv FU busy (non-pipelined, 20 cycles) with pending DIV instructions
+    // Check if there are ready IntDiv instructions in the IQ waiting for FU
+    if (!instQueue.hasReadyIntDiv()) {
+        return false;
+    }
+    // If IntDiv FUs are occupied and there are more DIVs waiting, it's a DIV stall
+    return numExecutingIntDiv > 0;
+}
+
 void
 IEW::checkSignalsAndUpdate(ThreadID tid)
 {
@@ -889,6 +1039,7 @@ IEW::dispatchInsts(ThreadID tid)
     int insts_to_add = insts_to_dispatch.size();
 
     DynInstPtr inst;
+    IQType targetIQ = IQType::AIQ0;
     bool add_to_iq = false;
     int dis_num_inst = 0;
 
@@ -987,6 +1138,10 @@ IEW::dispatchInsts(ThreadID tid)
         }
 
 
+        // Determine the target IQ type based on instruction characteristics
+        // (C910-style typed IQ routing)
+        add_to_iq = false;
+
         // Otherwise issue the instruction just fine.
         if (inst->isAtomic()) {
             DPRINTF(IEW, "[tid:%i] Issue: Memory instruction "
@@ -1001,7 +1156,6 @@ IEW::dispatchInsts(ThreadID tid)
             // head of commit.
             inst->setCanCommit();
             instQueue.insertNonSpec(inst);
-            add_to_iq = false;
 
             ++iewStats.dispNonSpecInsts;
 
@@ -1016,6 +1170,8 @@ IEW::dispatchInsts(ThreadID tid)
 
             ++iewStats.dispLoadInsts;
 
+            // Loads go to LSIQ for address calculation
+            targetIQ = IQType::LSIQ;
             add_to_iq = true;
 
             toRename->iewInfo[tid].dispatchedToLQ++;
@@ -1034,16 +1190,21 @@ IEW::dispatchInsts(ThreadID tid)
                 // @todo: This is somewhat specific to Alpha.
                 inst->setCanCommit();
                 instQueue.insertNonSpec(inst);
-                add_to_iq = false;
 
                 ++iewStats.dispNonSpecInsts;
             } else {
+                // Store address calculation → LSIQ (Pipe3)
+                // Store data write → SDIQ (Pipe5)
+                // In gem5, a single store instruction does both, so we
+                // route to LSIQ for address calc. The LSQ handles data.
+                targetIQ = IQType::LSIQ;
                 add_to_iq = true;
             }
 
             toRename->iewInfo[tid].dispatchedToSQ++;
         } else if (inst->isReadBarrier() || inst->isWriteBarrier()) {
-            // Same as non-speculative stores.
+            // FENCE/barrier: original path — insert as barrier for
+            // memory ordering, IQ entry assigned by findIQ.
             inst->setCanCommit();
             instQueue.insertBarrier(inst);
             add_to_iq = false;
@@ -1062,7 +1223,71 @@ IEW::dispatchInsts(ThreadID tid)
             add_to_iq = false;
         } else {
             assert(!inst->isExecuted());
+            // Route non-memory instructions to typed IQs
             add_to_iq = true;
+
+            enums::OpClass opClass = inst->opClass();
+            bool isBranch = inst->isControl();
+
+            if (isBranch) {
+                // Branches/jumps go to BIQ
+                targetIQ = IQType::BIQ;
+
+                // Mark procedure calls (CALL/JAL with link) and returns
+                if (inst->isCall()) {
+                    inst->markProcedureCall();
+                }
+                if (inst->isReturn()) {
+                    inst->markReturnInst();
+                }
+            } else if (inst->isVector()) {
+                // Vector instructions
+                // Vector memory operations → VMB
+                if (opClass == enums::SimdUnitStrideLoad ||
+                    opClass == enums::SimdUnitStrideStore ||
+                    opClass == enums::SimdUnitStrideMaskLoad ||
+                    opClass == enums::SimdUnitStrideMaskStore ||
+                    opClass == enums::SimdStridedLoad ||
+                    opClass == enums::SimdStridedStore ||
+                    opClass == enums::SimdIndexedLoad ||
+                    opClass == enums::SimdIndexedStore ||
+                    opClass == enums::SimdWholeRegisterLoad ||
+                    opClass == enums::SimdWholeRegisterStore ||
+                    opClass == enums::SimdUnitStrideFaultOnlyFirstLoad) {
+                    targetIQ = IQType::VMB;
+                } else if (opClass == enums::SimdFloatDiv ||
+                           opClass == enums::SimdFloatSqrt ||
+                           opClass == enums::SimdFloatMult ||
+                           opClass == enums::SimdFloatMultAcc ||
+                           opClass == enums::SimdFloatMatMultAcc) {
+                    // Vector multiply/div → VIQ1 (VFMAU)
+                    targetIQ = IQType::VIQ1;
+                } else {
+                    // Vector ALU → VIQ0
+                    targetIQ = IQType::VIQ0;
+                }
+            } else if (inst->isFloating()) {
+                // Scalar FP → VIQ1
+                targetIQ = IQType::VIQ1;
+            } else {
+                // Integer ALU operations
+                if (opClass == enums::IntMult ||
+                    opClass == enums::FloatMult ||
+                    opClass == enums::FloatMultAcc) {
+                    // MUL/MADD → AIQ1 (has MLA unit)
+                    targetIQ = IQType::AIQ1;
+                } else if (opClass == enums::IntDiv ||
+                           opClass == enums::FloatDiv ||
+                           opClass == enums::FloatSqrt) {
+                    // DIV/REM → AIQ1 (or AIQ0 if AIQ1 full)
+                    targetIQ = IQType::AIQ1;
+                } else {
+                    // Integer ALU → round-robin AIQ0/AIQ1
+                    targetIQ = (instQueue.getAIQRRCounter() % 2 == 0)
+                        ? IQType::AIQ0 : IQType::AIQ1;
+                    instQueue.advanceAIQRRCounter();
+                }
+            }
         }
 
         if (add_to_iq && inst->isNonSpeculative()) {
@@ -1081,9 +1306,54 @@ IEW::dispatchInsts(ThreadID tid)
         }
 
         // If the instruction queue is not full, then add the
-        // instruction.
+        // instruction to the appropriate typed IQ.
         if (add_to_iq) {
-            instQueue.insert(inst);
+            if (!instQueue.insertToIQType(inst, targetIQ)) {
+                // Target IQ is full — try fallback routing.
+                IQType fallbackIQ = IQType::NUM_IQ_TYPES;
+                bool fallbackOk = false;
+
+                switch (static_cast<int>(targetIQ)) {
+                  case static_cast<int>(IQType::AIQ0):
+                    fallbackIQ = IQType::AIQ1;
+                    break;
+                  case static_cast<int>(IQType::AIQ1):
+                    fallbackIQ = IQType::AIQ0;
+                    break;
+                  case static_cast<int>(IQType::BIQ):
+                    fallbackIQ = IQType::AIQ0;
+                    break;
+                  case static_cast<int>(IQType::VIQ0):
+                    fallbackIQ = IQType::VIQ1;
+                    break;
+                  case static_cast<int>(IQType::VIQ1):
+                    fallbackIQ = IQType::AIQ0;
+                    break;
+                  case static_cast<int>(IQType::VMB):
+                    fallbackIQ = IQType::LSIQ;
+                    break;
+                  default:
+                    break;
+                }
+
+                if (fallbackIQ != IQType::NUM_IQ_TYPES) {
+                    fallbackOk = instQueue.insertToIQType(inst, fallbackIQ);
+                }
+
+                if (!fallbackOk && !instQueue.isFull(inst)) {
+                    instQueue.insert(inst);
+                    fallbackOk = true;
+                }
+
+                if (!fallbackOk) {
+                    DPRINTF(IEW, "[tid:%i] Issue: IQ type %s is full.\n",
+                            tid, to_string(targetIQ));
+                    block(tid);
+                    toRename->iewUnblock[tid] = false;
+                    ++iewStats.iqFullEvents;
+                    break;
+                }
+            }
         }
 
         insts_to_dispatch.pop();
@@ -1275,6 +1545,144 @@ IEW::executeInsts()
 
         updateExeInstStats(inst);
 
+        // C910 HPCP: count pipe issue by opClass → pipe mapping
+        OpClass opc = inst->opClass();
+        int pipeIdx = 0; // default: Pipe0 (IU ALU)
+        switch (opc) {
+          case enums::IntAlu:
+            pipeIdx = 0; // Pipe0/Pipe1: IU ALU
+            break;
+          case enums::IntMult:
+          case enums::IntDiv:
+            pipeIdx = 1; // Pipe1: IU MLA/DIV
+            break;
+          case enums::FloatAdd:
+          case enums::FloatCmp:
+          case enums::FloatCvt:
+          case enums::Bf16Cvt:
+            pipeIdx = 6; // Pipe6: VFPU ALU (scalar FP)
+            break;
+          case enums::FloatMult:
+          case enums::FloatMultAcc:
+          case enums::FloatMisc:
+            pipeIdx = 7; // Pipe7: VFPU MA
+            break;
+          case enums::FloatDiv:
+          case enums::FloatSqrt:
+            pipeIdx = 6; // Pipe6/7: FloatDiv/Sqrt
+            break;
+          case enums::SimdAdd:
+          case enums::SimdAddAcc:
+          case enums::SimdAlu:
+          case enums::SimdCmp:
+          case enums::SimdCvt:
+          case enums::SimdMisc:
+          case enums::SimdShift:
+          case enums::SimdShiftAcc:
+          case enums::SimdExt:
+          case enums::SimdFloatExt:
+          case enums::SimdConfig:
+          case enums::SimdPredAlu:
+          case enums::SimdFloatAdd:
+          case enums::SimdFloatAlu:
+          case enums::SimdFloatCmp:
+          case enums::SimdFloatCvt:
+          case enums::SimdFloatMisc:
+          case enums::SimdReduceAdd:
+          case enums::SimdReduceAlu:
+          case enums::SimdReduceCmp:
+          case enums::SimdFloatReduceAdd:
+          case enums::SimdFloatReduceCmp:
+          case enums::SimdDotProd:
+          case enums::SimdAes:
+          case enums::SimdAesMix:
+          case enums::SimdSha1Hash:
+          case enums::SimdSha1Hash2:
+          case enums::SimdSha256Hash:
+          case enums::SimdSha256Hash2:
+          case enums::SimdShaSigma2:
+          case enums::SimdShaSigma3:
+          case enums::SimdSha3:
+          case enums::SimdSm4e:
+          case enums::SimdCrc:
+          case enums::SimdBf16Add:
+          case enums::SimdBf16Cmp:
+          case enums::SimdBf16Cvt:
+          case enums::MatrixMov:
+            pipeIdx = 6; // Pipe6: VFPU ALU (vector ALU)
+            break;
+          case enums::SimdMult:
+          case enums::SimdMultAcc:
+          case enums::SimdMatMultAcc:
+          case enums::SimdFloatMult:
+          case enums::SimdFloatMultAcc:
+          case enums::SimdFloatMatMultAcc:
+          case enums::SimdDiv:
+          case enums::SimdSqrt:
+          case enums::SimdFloatDiv:
+          case enums::SimdFloatSqrt:
+          case enums::SimdBf16DotProd:
+          case enums::SimdBf16MatMultAcc:
+          case enums::SimdBf16Mult:
+          case enums::SimdBf16MultAcc:
+          case enums::Matrix:
+          case enums::MatrixOP:
+            pipeIdx = 7; // Pipe7: VFPU MA (vector MA)
+            break;
+          case enums::System:
+            pipeIdx = 4; // Pipe4: LSU Special (FENCE/CSR)
+            break;
+          case enums::MemRead:
+          case enums::FloatMemRead:
+          case enums::SimdUnitStrideLoad:
+          case enums::SimdUnitStrideMaskLoad:
+          case enums::SimdUnitStrideSegmentedLoad:
+          case enums::SimdStridedLoad:
+          case enums::SimdIndexedLoad:
+          case enums::SimdUnitStrideFaultOnlyFirstLoad:
+          case enums::SimdUnitStrideSegmentedFaultOnlyFirstLoad:
+          case enums::SimdWholeRegisterLoad:
+          case enums::SimdStrideSegmentedLoad:
+            pipeIdx = 3; // Pipe3: LSU Load
+            break;
+          case enums::MemWrite:
+          case enums::FloatMemWrite:
+          case enums::SimdUnitStrideStore:
+          case enums::SimdUnitStrideMaskStore:
+          case enums::SimdUnitStrideSegmentedStore:
+          case enums::SimdStridedStore:
+          case enums::SimdIndexedStore:
+          case enums::SimdWholeRegisterStore:
+          case enums::SimdStrideSegmentedStore:
+            pipeIdx = 5; // Pipe5: LSU Store
+            break;
+          default:
+            // RISC-V fences map to No_OpClass; detect via flags.
+            if (opc == enums::No_OpClass) {
+                if (inst->isReadBarrier() || inst->isWriteBarrier()) {
+                    pipeIdx = 4; // Pipe4: LSU Special (fence)
+                } else {
+                    pipeIdx = 0; // default: Pipe0
+                }
+            } else {
+                pipeIdx = 0;
+            }
+            break;
+        }
+        // Override pipe for control instructions (branches/jumps).
+        // RISC-V branches may have opClass=IntAlu, so check flags after switch.
+        if (inst->isDirectCtrl() || inst->isIndirectCtrl()) {
+            pipeIdx = 2; // Pipe2: BJU
+        }
+        if (pipeIdx >= 0 && pipeIdx < 8) {
+            iewStats.pipeIssueCount[pipeIdx]++;
+        }
+        if (opc == enums::System ||
+            (opc == enums::No_OpClass &&
+             (inst->isReadBarrier() || inst->isWriteBarrier()))) {
+            iewStats.fenceSyncCount++;
+        }
+
         // Check if branch prediction was correct, if not then we need
         // to tell commit to squash in flight instructions.  Only
         // handle this if there hasn't already been something that
@@ -1382,8 +1790,12 @@ IEW::writebackInsts()
     // Loop through the head of the time buffer and wake any
     // dependents.  These instructions are about to write back.  Also
     // mark scoreboard that this instruction is finally complete.
-    // Either have IEW have direct access to scoreboard, or have this
-    // as part of backwards communication.
+    // Writeback ports are classified by destination register type
+    // (PREG/VREG/EREG) with independent port counts per type.
+    unsigned pregWBCount = 0;
+    unsigned vregWBCount = 0;
+    unsigned eregWBCount = 0;
+
     for (int inst_num = 0; inst_num < wbWidth &&
              toCommit->insts[inst_num]; inst_num++) {
         DynInstPtr inst = toCommit->insts[inst_num];
@@ -1404,6 +1816,45 @@ IEW::writebackInsts()
         // when it's ready to execute the strictly ordered load.
         if (!inst->isSquashed() && inst->isExecuted() &&
                 inst->getFault() == NoFault) {
+
+            // Count destination registers by PRF type to enforce per-port limits
+            bool hasPregDest = false;
+            bool hasVregDest = false;
+            bool hasEregDest = false;
+
+            for (int i = 0; i < inst->numDestRegs(); i++) {
+                auto dest = inst->renamedDestIdx(i);
+                if (dest->getNumPinnedWritesToComplete() == 0) {
+                    switch (dest->classValue()) {
+                      case IntRegClass:
+                        hasPregDest = true;
+                        break;
+                      case VecRegClass:
+                        hasVregDest = true;
+                        break;
+                      case FloatRegClass:
+                        hasEregDest = true;
+                        break;
+                      default:
+                        break;
+                    }
+                }
+            }
+
+            // Check per-PRF writeback port limits
+            if ((hasPregDest && pregWBCount >= pregWBWidth) ||
+                (hasVregDest && vregWBCount >= vregWBWidth) ||
+                (hasEregDest && eregWBCount >= eregWBWidth)) {
+                // This instruction exceeds per-PRF port limits;
+                // stop processing further instructions this cycle.
+                DPRINTF(IEW, "Writeback: PRF port limit reached "
+                        "(preg:%u/%u, vreg:%u/%u, ereg:%u/%u)\n",
+                        pregWBCount, pregWBWidth,
+                        vregWBCount, vregWBWidth,
+                        eregWBCount, eregWBWidth);
+                break;
+            }
+
             int dependents = instQueue.wakeDependents(inst);
 
             for (int i = 0; i < inst->numDestRegs(); i++) {
@@ -1416,6 +1867,11 @@ IEW::writebackInsts()
                     scoreboard->setReg(inst->renamedDestIdx(i));
                 }
             }
+
+            // Update per-PRF writeback port counts
+            if (hasPregDest) pregWBCount++;
+            if (hasVregDest) vregWBCount++;
+            if (hasEregDest) eregWBCount++;
 
             if (dependents) {
                 iewStats.producerInst[tid]++;
@@ -1542,6 +1998,26 @@ IEW::tick()
             ldstQueue.numFreeLoadEntries(), ldstQueue.numFreeStoreEntries());
 
     updateStatus();
+
+    // C910: Count stall types each cycle
+    for (ThreadID tid : *activeThreads) {
+        StallType stall = detectStallType(tid);
+        iewStats.stallCycles[stall]++;
+        if (stall == BACKEND_STALL) {
+            iewStats.backendStallCycles++;
+        }
+        if (stall != NO_STALL) {
+            iewStats.pipelineStallCycles++;
+        }
+    }
+
+    // C910: Count IQ empty / pipeline empty cycles
+    if (!instQueue.hasReadyInsts() && !ldstQueue.willWB()) {
+        iewStats.iqEmptyCycles++;
+        if (skidsEmpty()) {
+            iewStats.pipelineEmptyCycles++;
+        }
+    }
 
     if (wroteToTimeBuffer) {
         DPRINTF(Activity, "Activity this cycle.\n");

@@ -47,6 +47,7 @@
 #include "base/logging.hh"
 #include "cpu/o3/dyn_inst.hh"
 #include "cpu/o3/fu_pool.hh"
+#include "cpu/o3/iew.hh"
 #include "cpu/o3/limits.hh"
 #include "debug/IQ.hh"
 #include "enums/OpClass.hh"
@@ -64,9 +65,24 @@ namespace gem5
 namespace o3
 {
 
+static IQType
+parseIQType(const std::string &s)
+{
+    if (s == "AIQ0") return IQType::AIQ0;
+    if (s == "AIQ1") return IQType::AIQ1;
+    if (s == "BIQ")  return IQType::BIQ;
+    if (s == "LSIQ") return IQType::LSIQ;
+    if (s == "SDIQ") return IQType::SDIQ;
+    if (s == "VIQ0") return IQType::VIQ0;
+    if (s == "VIQ1") return IQType::VIQ1;
+    if (s == "VMB")  return IQType::VMB;
+    panic("Unknown IQType '%s'", s);
+}
+
 IQUnit::IQUnit(const IQUnitParams &params)
     : SimObject(params),
       iqPolicy(params.smtIQPolicy),
+      _iqType(parseIQType(params.iqType)),
       numThreads(params.numThreads),
       activeThreads(nullptr),
       _freeEntries(params.numEntries),
@@ -228,6 +244,7 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
       numThreads(params.numThreads),
       totalWidth(params.issueWidth),
       commitToIEWDelay(params.commitToIEWDelay),
+      aiqRRCounter(0),
       iqStats(cpu, totalWidth),
       iqIOStats(cpu)
 {
@@ -316,7 +333,15 @@ InstructionQueue::IQStats::IQStats(CPU *cpu, const unsigned &total_width)
       ADD_STAT(fuBusyRate,
                statistics::units::Rate<statistics::units::Count,
                                        statistics::units::Count>::get(),
-               "FU busy rate (busy events/executed inst)")
+               "FU busy rate (busy events/executed inst)"),
+      ADD_STAT(ex1ForwardInsts, statistics::units::Count::get(),
+               "EX1 combinational forwarding (single-cycle instructions)"),
+      ADD_STAT(ex2WritebackInsts, statistics::units::Count::get(),
+               "EX2 clock-edge writeback (multi-cycle instructions)"),
+      ADD_STAT(ex2LatencyHist, statistics::units::Count::get(),
+               "EX2 instruction latency histogram (cycles per instruction)"),
+      ADD_STAT(totalWakeDependents, statistics::units::Count::get(),
+               "Total number of dependent instructions woken")
 {
     instsAdded
         .prereq(instsAdded);
@@ -366,6 +391,12 @@ InstructionQueue::IQStats::IQStats(CPU *cpu, const unsigned &total_width)
 */
     numIssuedDist
         .init(0,total_width,1)
+        .flags(statistics::pdf)
+        ;
+
+    // EX2 latency histogram: buckets for 1-32 cycles (bucket size=4)
+    ex2LatencyHist
+        .init(1, 32, 4)
         .flags(statistics::pdf)
         ;
 /*
@@ -652,6 +683,12 @@ InstructionQueue::hasReadyInsts()
     return false;
 }
 
+bool
+InstructionQueue::hasReadyIntDiv()
+{
+    return !readyInsts[enums::IntDiv].empty();
+}
+
 IQUnit *
 InstructionQueue::findIQ(const DynInstPtr &inst)
 {
@@ -663,6 +700,66 @@ InstructionQueue::findIQ(const DynInstPtr &inst)
         }
     }
     return nullptr;
+}
+
+IQUnit *
+InstructionQueue::findIQByType(IQType type, ThreadID tid)
+{
+    for (auto iq : iqs) {
+        if (iq->iqType() == type && iq->numFreeEntries(tid) > 0) {
+            return iq;
+        }
+    }
+    return nullptr;
+}
+
+bool
+InstructionQueue::isFullByType(IQType type, ThreadID tid)
+{
+    for (auto iq : iqs) {
+        if (iq->iqType() == type && iq->numFreeEntries(tid) > 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+InstructionQueue::insertToIQType(const DynInstPtr &new_inst, IQType type)
+{
+    auto iq = findIQByType(type, new_inst->threadNumber);
+    if (!iq)
+        return false;
+
+    if (new_inst->isFloating()) {
+        iqIOStats.fpInstQueueWrites++;
+    } else if (new_inst->isVector()) {
+        iqIOStats.vecInstQueueWrites++;
+    } else {
+        iqIOStats.intInstQueueWrites++;
+    }
+
+    assert(new_inst);
+    DPRINTF(IQ, "Adding instruction [sn:%llu] PC %s to IQ type %s.\n",
+            new_inst->seqNum, new_inst->pcState(), to_string(type));
+
+    instList[new_inst->threadNumber].push_back(new_inst);
+    iq->insert(new_inst);
+
+    // Set C910-style age vector position based on insertion order.
+    new_inst->setAgeInIQ(instList[new_inst->threadNumber].size() - 1);
+
+    addToDependents(new_inst);
+    addToProducers(new_inst);
+
+    if (new_inst->isMemRef()) {
+        memDepUnit[new_inst->threadNumber].insert(new_inst);
+    } else {
+        addIfReady(new_inst);
+    }
+
+    ++iqStats.instsAdded;
+    return true;
 }
 
 void
@@ -686,6 +783,9 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     auto iq = findIQ(new_inst);
     assert(iq);
     iq->insert(new_inst);
+
+    // Set C910-style age vector position based on insertion order.
+    new_inst->setAgeInIQ(instList[new_inst->threadNumber].size() - 1);
 
     // Look through its source registers (physical regs), and mark any
     // dependencies.
@@ -730,6 +830,9 @@ InstructionQueue::insertNonSpec(const DynInstPtr &new_inst)
     auto iq = findIQ(new_inst);
     assert(iq);
     iq->insert(new_inst);
+
+    // Set C910-style age vector position based on insertion order.
+    new_inst->setAgeInIQ(instList[new_inst->threadNumber].size() - 1);
 
     // Have this instruction set itself as the producer of its destination
     // register(s).
@@ -829,6 +932,11 @@ InstructionQueue::processFUCompletion(const DynInstPtr &inst, FUPool *fu_pool,
     // long latency op).  Wake it if it was.  This may be overkill.
    --wbOutstanding;
     iewStage->wakeCPU();
+
+    // Track IntDiv execution completion for DIV_STALL detection
+    if (inst->opClass() == enums::IntDiv) {
+        iewStage->finishIntDiv();
+    }
 
     if (fu_pool) {
         assert(fu_idx > -1);
@@ -935,8 +1043,10 @@ InstructionQueue::scheduleReadyInsts()
         if (idx > FUPool::NoFreeFU || idx == FUPool::NoNeedFU ||
             idx == FUPool::NoCapableFU) {
             if (op_latency == Cycles(1)) {
+                // EX1 combinational forwarding path — single cycle
                 i2e_info->size++;
                 instsToExecute.push_back(issuing_inst);
+                iqStats.ex1ForwardInsts++;
 
                 // Add the FU onto the list of FU's to be freed next
                 // cycle if we used one.
@@ -954,8 +1064,16 @@ InstructionQueue::scheduleReadyInsts()
             } else {
                 assert(idx != FUPool::NoCapableFU);
                 bool pipelined = fu_pool->isPipelined(op_class);
-                // Generate completion event for the FU
+                // EX2 clock-edge writeback path — multi-cycle
                 ++wbOutstanding;
+                iqStats.ex2WritebackInsts++;
+                iqStats.ex2LatencyHist.sample(op_latency);
+
+                // Track IntDiv execution start for DIV_STALL detection
+                if (op_class == enums::IntDiv) {
+                    iewStage->startIntDiv();
+                }
+
                 auto execution =
                     new FUCompletion(issuing_inst, fu_pool, idx, this);
 
@@ -1167,6 +1285,7 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
         // Mark the scoreboard as having that register ready.
         regScoreboard[dest_reg->flatIndex()] = true;
     }
+    iqStats.totalWakeDependents += dependents;
     return dependents;
 }
 
@@ -1537,7 +1656,8 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
 {
     // If the instruction now has all of its source registers
     // available, then add it to the list of ready instructions.
-    if (inst->readyToIssue()) {
+    // C910-style ready condition: rdy = vld && src0_vld && src1_vld && !frz
+    if (inst->readyToIssue() && !inst->isFrozen()) {
 
         //Add the instruction to the proper ready list.
         if (inst->isMemRef()) {

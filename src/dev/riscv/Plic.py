@@ -66,11 +66,16 @@ class Plic(PlicBase):
     cxx_header = "dev/riscv/plic.hh"
     cxx_class = "gem5::Plic"
     pio_size = 0x4000000
-    n_src = Param.Int("Number of interrupt sources")
+    n_src = Param.Int(
+        144,
+        "Number of interrupt sources. "
+        "OpenC910: PLIC_INT_NUM=144 (144 个中断源)",
+    )
     # Ref: https://github.com/qemu/qemu/blob/760b4dc/hw/intc/sifive_plic.c#L285
     hart_config = Param.String(
         "",
-        "String represent for PLIC hart/pmode config like QEMU plic"
+        "String represent for PLIC hart/pmode config like QEMU plic. "
+        "OpenC910: PLIC_HART_NUM = actual Hart count, PLIC_ID_NUM=10, PLIC_PRIO_BIT=5. "
         "Ex."
         "'M'              1 hart with M mode"
         "'MS,MS'          2 harts, 0-1 with M and S mode"

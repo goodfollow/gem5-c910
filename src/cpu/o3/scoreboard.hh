@@ -58,53 +58,115 @@ namespace o3
 {
 
 /**
- * Implements a simple scoreboard to track which registers are
- * ready. This class operates on the unified physical register space,
- * because the different classes of registers do not need to be distinguished.
- * Registers being part of a fixed mapping are always considered ready.
+ * Implements a scoreboard to track register readiness across multiple
+ * independent physical register files (PRFs), aligned with OpenC910's
+ * 3-PRF architecture (PREG/VREG/EREG).
+ *
+ * Register class routing:
+ *   - IntRegClass       → pregScoreBoard (integer PRF)
+ *   - FloatRegClass     → eregScoreBoard (scalar FP PRF)
+ *   - VecRegClass       → vregScoreBoard (vector PRF)
+ *   - VecPredRegClass   → otherScoreBoard (predicate registers)
+ *   - VecElemClass      → otherScoreBoard (vector element registers)
+ *   - MatRegClass       → otherScoreBoard (matrix registers)
+ *   - CCRegClass        → otherScoreBoard (condition code registers)
  */
 class Scoreboard
 {
   private:
-    /** The object name, for DPRINTF.  We have to declare this
-     *  explicitly because Scoreboard is not a SimObject. */
+    /** The object name, for DPRINTF. */
     const std::string _name;
 
-    /** Scoreboard of physical integer registers, saying whether or not they
-     *  are ready. */
-    std::vector<bool> regScoreBoard;
+    /** Integer PRF scoreboard (PREG) — e.g., 95 registers for RISC-V. */
+    std::vector<bool> pregScoreBoard;
+    unsigned _numPregs;
 
-    /** The number of actual physical registers */
-    GEM5_CLASS_VAR_USED unsigned numPhysRegs;
+    /** Scalar FP PRF scoreboard (EREG) — e.g., 32 registers. */
+    std::vector<bool> eregScoreBoard;
+    unsigned _numEregs;
+
+    /** Vector PRF scoreboard (VREG) — e.g., 64 registers. */
+    std::vector<bool> vregScoreBoard;
+    unsigned _numVregs;
+
+    /** Scoreboard for other renamable register classes
+     *  (VecPred, VecElem, Mat, CC). Indexed by flatIndex(). */
+    std::vector<bool> otherScoreBoard;
+    unsigned _numOtherRegs;
+
+    /** Total number of physical registers (sum of all above). */
+    GEM5_CLASS_VAR_USED unsigned _numPhysRegs;
 
   public:
-    /** Constructs a scoreboard.
-     *  @param _numPhysicalRegs Number of physical registers.
-     *  @param _numMiscRegs Number of miscellaneous registers.
-     */
-    Scoreboard(const std::string &_my_name, unsigned _numPhysicalRegs);
+    /** Constructs a scoreboard with separate PRF partitions. */
+    Scoreboard(const std::string &_my_name,
+               unsigned _numPregs, unsigned _numEregs,
+               unsigned _numVregs, unsigned _numOtherRegs);
 
     /** Destructor. */
     ~Scoreboard() {}
 
     /** Returns the name of the scoreboard. */
-    std::string name() const { return _name; };
+    std::string name() const { return _name; }
+
+    /** Returns the total number of physical registers. */
+    unsigned
+    totalNumPhysRegs() const
+    {
+        return _numPhysRegs;
+    }
+
+    /** Returns the number of integer PRF registers. */
+    unsigned
+    numPregs() const
+    {
+        return _numPregs;
+    }
+
+    /** Returns the number of scalar FP PRF registers. */
+    unsigned
+    numEregs() const
+    {
+        return _numEregs;
+    }
+
+    /** Returns the number of vector PRF registers. */
+    unsigned
+    numVregs() const
+    {
+        return _numVregs;
+    }
+
+    /** Returns the number of other PRF registers. */
+    unsigned
+    numOtherRegs() const
+    {
+        return _numOtherRegs;
+    }
 
     /** Checks if the register is ready. */
     bool
     getReg(PhysRegIdPtr phys_reg) const
     {
         if (phys_reg->isAlwaysReady()) {
-            // This is usually the case for registers that
-            // can only be updated non-speculatively
-            // (The register is not being written by another
-            // inflight instruction)
             return true;
         }
 
-        assert(phys_reg->flatIndex() < numPhysRegs);
-
-        return regScoreBoard[phys_reg->flatIndex()];
+        switch (phys_reg->classValue()) {
+          case IntRegClass:
+            assert(phys_reg->index() < _numPregs);
+            return pregScoreBoard[phys_reg->index()];
+          case FloatRegClass:
+            assert(phys_reg->index() < _numEregs);
+            return eregScoreBoard[phys_reg->index()];
+          case VecRegClass:
+            assert(phys_reg->index() < _numVregs);
+            return vregScoreBoard[phys_reg->index()];
+          default:
+            // VecPred, VecElem, Mat, CC → other scoreboard
+            assert(phys_reg->flatIndex() < _numOtherRegs);
+            return otherScoreBoard[phys_reg->flatIndex()];
+        }
     }
 
     /** Sets the register as ready. */
@@ -112,19 +174,30 @@ class Scoreboard
     setReg(PhysRegIdPtr phys_reg)
     {
         if (phys_reg->isAlwaysReady()) {
-            // This is usually the case for registers that
-            // can only be updated non-speculatively
-            // (The register is not being written by another
-            // inflight instruction)
             return;
         }
 
-        assert(phys_reg->flatIndex() < numPhysRegs);
+        switch (phys_reg->classValue()) {
+          case IntRegClass:
+            assert(phys_reg->index() < _numPregs);
+            pregScoreBoard[phys_reg->index()] = true;
+            break;
+          case FloatRegClass:
+            assert(phys_reg->index() < _numEregs);
+            eregScoreBoard[phys_reg->index()] = true;
+            break;
+          case VecRegClass:
+            assert(phys_reg->index() < _numVregs);
+            vregScoreBoard[phys_reg->index()] = true;
+            break;
+          default:
+            assert(phys_reg->flatIndex() < _numOtherRegs);
+            otherScoreBoard[phys_reg->flatIndex()] = true;
+            break;
+        }
 
         DPRINTF(Scoreboard, "Setting reg %i (%s) as ready\n",
                 phys_reg->index(), phys_reg->className());
-
-        regScoreBoard[phys_reg->flatIndex()] = true;
     }
 
     /** Sets the register as not ready. */
@@ -132,21 +205,31 @@ class Scoreboard
     unsetReg(PhysRegIdPtr phys_reg)
     {
         if (phys_reg->isAlwaysReady()) {
-            // This is usually the case for registers that
-            // can only be updated non-speculatively
-            // (The register is not being written by another
-            // inflight instruction)
             return;
         }
 
-        assert(phys_reg->flatIndex() < numPhysRegs);
+        switch (phys_reg->classValue()) {
+          case IntRegClass:
+            assert(phys_reg->index() < _numPregs);
+            pregScoreBoard[phys_reg->index()] = false;
+            break;
+          case FloatRegClass:
+            assert(phys_reg->index() < _numEregs);
+            eregScoreBoard[phys_reg->index()] = false;
+            break;
+          case VecRegClass:
+            assert(phys_reg->index() < _numVregs);
+            vregScoreBoard[phys_reg->index()] = false;
+            break;
+          default:
+            assert(phys_reg->flatIndex() < _numOtherRegs);
+            otherScoreBoard[phys_reg->flatIndex()] = false;
+            break;
+        }
 
-        DPRINTF(Scoreboard, "Setting reg %i (%s) as busy\n", phys_reg->index(),
-                phys_reg->className());
-
-        regScoreBoard[phys_reg->flatIndex()] = false;
+        DPRINTF(Scoreboard, "Setting reg %i (%s) as busy\n",
+                phys_reg->index(), phys_reg->className());
     }
-
 };
 
 } // namespace o3

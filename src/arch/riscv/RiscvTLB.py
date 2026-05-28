@@ -42,7 +42,9 @@ class RiscvPagetableWalker(ClockedObject):
     port = RequestPort("Port for the hardware table walker")
     system = Param.System(Parent.any, "system object")
     num_squash_per_cycle = Param.Unsigned(
-        4, "Number of outstanding walks that can be squashed per cycle"
+        4,
+        "Number of outstanding walks that can be squashed per cycle. "
+        "OpenC910: Not applicable (gem5 仿真参数，RTL 无对应)",
     )
     # Grab the pma_checker from the MMU
     pma_checker = Param.BasePMAChecker(Parent.any, "PMA Checker")
@@ -54,7 +56,7 @@ class RiscvTLB(BaseTLB):
     cxx_class = "gem5::RiscvISA::TLB"
     cxx_header = "arch/riscv/tlb.hh"
 
-    size = Param.Int(64, "TLB size")
+    size = Param.Int(1024, "TLB size. OpenC910: JTLB_ENTRY_1024 (可选 2048)")
     walker = Param.RiscvPagetableWalker(
         RiscvPagetableWalker(), "page table walker"
     )

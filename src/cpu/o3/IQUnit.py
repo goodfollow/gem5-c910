@@ -43,12 +43,29 @@ from m5.proxy import Parent
 from m5.SimObject import SimObject
 
 
+class IQType:
+    """Issue Queue types aligned with OpenC910 architecture."""
+
+    AIQ0 = "AIQ0"
+    AIQ1 = "AIQ1"
+    BIQ = "BIQ"
+    LSIQ = "LSIQ"
+    SDIQ = "SDIQ"
+    VIQ0 = "VIQ0"
+    VIQ1 = "VIQ1"
+    VMB = "VMB"
+
+
 class IQUnit(SimObject):
     type = "IQUnit"
     cxx_class = "gem5::o3::IQUnit"
     cxx_header = "cpu/o3/inst_queue.hh"
 
     numEntries = Param.Unsigned(64, "Number of instruction queue entries")
+
+    iqType = Param.String(
+        "AIQ0", "IQ type: AIQ0, AIQ1, BIQ, LSIQ, SDIQ, VIQ0, VIQ1, VMB"
+    )
 
     fuPool = Param.FUPool(DefaultFUPool(), "Functional Unit pool")
 

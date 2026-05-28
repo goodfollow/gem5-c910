@@ -31,3 +31,4 @@ class RiscvDecoder(InstDecoder):
     type = "RiscvDecoder"
     cxx_class = "gem5::RiscvISA::Decoder"
     cxx_header = "arch/riscv/decoder.hh"
+    # OpenC910: ct_ifu_ipdecode.v and other IFU decoder units

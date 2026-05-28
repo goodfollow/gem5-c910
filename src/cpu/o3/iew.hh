@@ -108,6 +108,25 @@ class IEW
         ThreadStatusMax
     };
 
+    /**
+     * C910-style stall types — 9 distinct stall reasons aligned with
+     * OpenC910 IEW stall classification.
+     */
+    enum StallType
+    {
+        NO_STALL = 0,
+        ROB_FULL,         // ctrl_is_rob_full — ROB entries exhausted
+        IQ_FULL,          // ctrl_is_iq_full — target IQ type full
+        VMB_FULL,         // ctrl_is_vmb_full — vector memory buffer full
+        TYPE_STALL,       // is_dis_type_stall — FENCE/barrier blocking
+        DISPATCH_STALL,   // ctrl_is_dis_stall — composite of ROB/IQ/VMB full
+        IS_STALL,         // ctrl_is_stall — IS-level total stall
+        DIV_STALL,        // iu_yy_xx_div_wb_stall — DIV unit writeback blocked
+        VDIV_STALL,       // vfpu_idu_vdiv_wb_stall — vector DIV blocked
+        BACKEND_STALL,    // idu_hpcp_backend_stall — execution unit stall
+        NUM_STALL_TYPES
+    };
+
   private:
     /** Overall stage status. */
     Status _status;
@@ -281,6 +300,17 @@ class IEW
     /** Checks if any of the stall conditions are currently true. */
     bool checkStall(ThreadID tid);
 
+    /** Fine-grained stall type detection (C910 alignment). */
+    StallType detectStallType(ThreadID tid);
+    bool isROBFull(ThreadID tid);
+    bool isIQFull(ThreadID tid);
+    bool isIQFullByType(ThreadID tid, IQType type);
+    bool isVMBFull(ThreadID tid);
+    bool isTypeStall(ThreadID tid);
+    bool isDispatchStall(ThreadID tid);
+    /** Check if DIV unit is stalled (IntDiv FU busy with pending DIV instructions). */
+    bool isDivStall(ThreadID tid);
+
     /** Processes inputs and changes state accordingly. */
     void checkSignalsAndUpdate(ThreadID tid);
 
@@ -295,6 +325,11 @@ class IEW
      * Writeback to run for one cycle.
      */
     void tick();
+
+    /** Track IntDiv FU execution start/end for DIV_STALL detection.
+     * Called from InstructionQueue (friend access via public methods). */
+    void startIntDiv() { numExecutingIntDiv++; }
+    void finishIntDiv() { if (numExecutingIntDiv > 0) numExecutingIntDiv--; }
 
   private:
     /** Updates execution stats based on the instruction. */
@@ -406,8 +441,16 @@ class IEW
      */
     unsigned wbCycle;
 
-    /** Writeback width. */
+    /** Writeback width (legacy, used as fallback if per-PRF widths are zero). */
     unsigned wbWidth;
+
+    /** Per-PRF writeback port widths (OpenC910 alignment). */
+    unsigned pregWBWidth;
+    unsigned vregWBWidth;
+    unsigned eregWBWidth;
+
+    /** Number of IntDiv instructions currently executing (for DIV_STALL detection). */
+    int numExecutingIntDiv;
 
     /** Number of active threads. */
     ThreadID numThreads;
@@ -475,6 +518,20 @@ class IEW
         statistics::Formula wbRate;
         /** Average number of woken instructions per writeback. */
         statistics::Formula wbFanout;
+
+        /** C910-style stall type counters. */
+        statistics::Vector stallCycles;
+        /** Backend stall cycle counter. */
+        statistics::Scalar backendStallCycles;
+        /** FENCE synchronization events. */
+        statistics::Scalar fenceSyncCount;
+
+        /** C910 HPCP (Hardware Performance Counter) events. */
+        statistics::Vector pipeIssueCount;     // idu_hpcp_rf_pipe[0:7]_inst_vld
+        statistics::Vector issueLatchFail;     // idu_hpcp_rf_pipe[0:7]_lch_fail_vld
+        statistics::Scalar iqEmptyCycles;       // idu_had_iq_empty
+        statistics::Scalar pipelineEmptyCycles; // idu_had_pipeline_empty
+        statistics::Scalar pipelineStallCycles; // idu_had_pipe_stall
     } iewStats;
 };
 

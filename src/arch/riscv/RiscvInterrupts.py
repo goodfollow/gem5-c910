@@ -42,11 +42,16 @@ class RiscvInterrupts(BaseInterrupts):
     cxx_class = "gem5::RiscvISA::Interrupts"
     cxx_header = "arch/riscv/interrupts.hh"
 
-    local_interrupt_pins = VectorIntSinkPin("Pins for local interrupts")
-    local_interrupt_ids = VectorParam.Unsigned(
-        [], "list of local interrupt ids"
+    local_interrupt_pins = VectorIntSinkPin(
+        "Pins for local interrupts. OpenC910: CLINT + PLIC"
     )
-    nmi_cause = Param.Int(0, "Non-maskable interrupt(NMI) cause")
+    local_interrupt_ids = VectorParam.Unsigned(
+        [],
+        "list of local interrupt ids. OpenC910: PLIC_INT_NUM=144 (144 个中断源)",
+    )
+    nmi_cause = Param.Int(
+        0, "Non-maskable interrupt(NMI) cause. OpenC910: Not implemented"
+    )
 
 
 add_citation(

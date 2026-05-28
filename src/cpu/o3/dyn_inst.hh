@@ -238,6 +238,62 @@ class DynInst : public ExecContext, public RefCounted
     // Whether or not the source register is ready, one bit per register.
     uint8_t *_readySrcIdx;
 
+    /*
+     * OpenC910-style IQ Entry tracking fields:
+     * These fields track the instruction state within the Issue Queue,
+     * aligned with C910's IQ Entry structure (vld, frz, src0_vld,
+     * src1_vld, agevec, pcall, rts, etc.).
+     */
+    bool _frozen = false;               // frz — wait for sync condition (FENCE)
+    bool _procedureCall = false;        // pcall — function call marker
+    bool _returnInst = false;           // rts — return from subroutine
+
+  public:
+    /** Check if the instruction is frozen (waiting for FENCE synchronization). */
+    bool isFrozen() const { return _frozen; }
+    /** Freeze the instruction (e.g., after FENCE to wait for older ops). */
+    void freeze() { _frozen = true; }
+    /** Unfreeze the instruction when synchronization is complete. */
+    void unfreeze() { _frozen = false; }
+
+    /** Check if this instruction is a procedure call (CALL/JAL with link). */
+    bool isProcedureCall() const { return _procedureCall; }
+    /** Mark this instruction as a procedure call. */
+    void markProcedureCall() { _procedureCall = true; }
+
+    /** Check if this instruction is a return from subroutine (RET/JALR x0). */
+    bool isReturnInst() const { return _returnInst; }
+    /** Mark this instruction as a return instruction. */
+    void markReturnInst() { _returnInst = true; }
+
+    /**
+     * C910-style per-source readiness tracking.
+     * src0Ready/src1Ready check if the first two source registers are ready,
+     * corresponding to C910's src0_vld and src1_vld fields in IQ Entry.
+     */
+    bool src0Ready() const { return _numSrcs == 0 || readySrcIdx(0); }
+    bool src1Ready() const { return _numSrcs < 2 || readySrcIdx(1); }
+
+  private:
+    /** The IQ type this instruction was dispatched to (C910 routing). */
+    int _iqType = -1;
+
+    /**
+     * Age vector position in the IQ. Lower values = older instructions.
+     * Used for C910-style age-based arbitration. seqNum provides a
+     * coarser ordering; ageInIQ tracks position within the current IQ.
+     */
+    unsigned _ageInIQ = 0;
+
+  public:
+    /** IQ type this instruction was dispatched to. -1 = not yet assigned. */
+    int iqType() const { return _iqType; }
+    void setIqType(int type) { _iqType = type; }
+
+    /** Age position within the IQ (for C910-style age arbitration). */
+    unsigned ageInIQ() const { return _ageInIQ; }
+    void setAgeInIQ(unsigned age) { _ageInIQ = age; }
+
   public:
     size_t numSrcs() const { return _numSrcs; }
     size_t numDests() const { return _numDests; }

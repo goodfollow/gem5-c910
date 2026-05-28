@@ -58,6 +58,31 @@ namespace gem5
 namespace o3
 {
 
+/**
+ * C910-style flush types — 4 distinct flush sources with different scopes.
+ * Aligned with OpenC910 flush classification:
+ *   - FLUSH_FE:   Frontend only (branch mispredict)
+ *   - FLUSH_IS:   Backend only (memory order violation)
+ *   - FLUSH_GLOBAL: Full pipeline (exception/trap)
+ *   - FLUSH_CSR:  Frontend + CSR sync (privilege/PTW change)
+ */
+enum class FlushType {
+    FLUSH_FE = 0,       // Frontend flush — clear IR/IS/RF, keep fetch state
+    FLUSH_IS,           // Backend flush — clear IS/RF, keep IR (frontend)
+    FLUSH_GLOBAL,       // Global flush — clear entire pipeline
+    FLUSH_CSR,          // CSR flush — frontend + CSR state sync
+    NUM_FLUSH_TYPES
+};
+
+inline const char*
+to_string(FlushType type)
+{
+    static const char* names[] = {
+        "flush_fe", "flush_is", "flush_global", "flush_csr"
+    };
+    return names[static_cast<int>(type)];
+}
+
 /** Struct that defines the information passed from fetch to decode. */
 struct FetchStruct
 {
@@ -221,6 +246,9 @@ struct TimeStruct
         bool clearInterrupt = false; // *F
         /// If a trap is pending
         bool trapPending = false; // *F
+
+        /// Flush type for graded squash (C910 alignment)
+        FlushType flushType = FlushType::FLUSH_GLOBAL; // *F, I
 
         /// Hack for now to send back an strictly ordered access to
         /// the IEW stage.

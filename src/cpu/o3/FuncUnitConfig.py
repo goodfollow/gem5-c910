@@ -41,15 +41,30 @@ from m5.objects.FuncUnit import *
 from m5.params import *
 from m5.SimObject import SimObject
 
+#
+# C910-style 8-pipe latency model
+#
+# Pipe0 (IU ALU):   ADD/SUB/AND/OR/XOR/SLL/SRL/SRA/SLT  → 1 cycle, pipelined
+# Pipe1 (IU ALU):   Same as Pipe0 + MLA (MUL/MADD)      → 1 cycle ALU, 3 cycle MLA
+# Pipe2 (BJU):      BR/JAL/JALR/AUIPC                   → 2 cycles, pipelined
+# Pipe3 (LSU Load): LB/LH/LW/LD/etc                     → 1 cycle (cache hit)
+# Pipe4 (LSU Spec): FENCE/FENCE.I/CSRR*                 → 1 cycle (special)
+# Pipe5 (LSU Store): SB/SH/SW/SD                         → 1 cycle (pipelined)
+# Pipe6 (VFPU ALU): Vector ALU ops                      → 3 cycles, pipelined
+# Pipe7 (VFPU MA):  Vector multiply-accumulate           → 5 cycles, pipelined
+
 
 class IntALU(FUDesc):
-    opList = [OpDesc(opClass="IntAlu")]
+    # Pipe0/Pipe1: IU ALU — 1 cycle latency, fully pipelined
+    opList = [OpDesc(opClass="IntAlu", opLat=1, pipelined=True)]
     count = 6
 
 
 class IntMultDiv(FUDesc):
+    # Pipe1: IU MLA — MUL/MADD (3 cycles, pipelined)
+    # Pipe0/Pipe1: IU DIV — DIV/REM (20 cycles, not pipelined)
     opList = [
-        OpDesc(opClass="IntMult", opLat=3),
+        OpDesc(opClass="IntMult", opLat=3, pipelined=True),
         OpDesc(opClass="IntDiv", opLat=20, pipelined=False),
     ]
 
@@ -57,20 +72,23 @@ class IntMultDiv(FUDesc):
 
 
 class FP_ALU(FUDesc):
+    # Pipe6: VFPU ALU — scalar FP ALU ops, 3 cycles, pipelined
     opList = [
-        OpDesc(opClass="FloatAdd", opLat=2),
-        OpDesc(opClass="FloatCmp", opLat=2),
-        OpDesc(opClass="FloatCvt", opLat=2),
-        OpDesc(opClass="Bf16Cvt", opLat=2),
+        OpDesc(opClass="FloatAdd", opLat=3, pipelined=True),
+        OpDesc(opClass="FloatCmp", opLat=3, pipelined=True),
+        OpDesc(opClass="FloatCvt", opLat=3, pipelined=True),
+        OpDesc(opClass="Bf16Cvt", opLat=3, pipelined=True),
     ]
     count = 4
 
 
 class FP_MultDiv(FUDesc):
+    # Pipe7: VFPU MA — FloatMult/MultAcc (5 cycles, pipelined)
+    # Pipe6/7: FloatDiv/Sqrt (not pipelined)
     opList = [
-        OpDesc(opClass="FloatMult", opLat=4),
-        OpDesc(opClass="FloatMultAcc", opLat=5),
-        OpDesc(opClass="FloatMisc", opLat=3),
+        OpDesc(opClass="FloatMult", opLat=5, pipelined=True),
+        OpDesc(opClass="FloatMultAcc", opLat=5, pipelined=True),
+        OpDesc(opClass="FloatMisc", opLat=3, pipelined=True),
         OpDesc(opClass="FloatDiv", opLat=12, pipelined=False),
         OpDesc(opClass="FloatSqrt", opLat=24, pipelined=False),
     ]
@@ -78,133 +96,164 @@ class FP_MultDiv(FUDesc):
 
 
 class SIMD_Unit(FUDesc):
+    # Pipe6 (VFPU ALU): Vector ALU ops — 3 cycles, pipelined
+    # Pipe7 (VFPU MA):  Vector Mult/MultAcc — 5 cycles, pipelined
     opList = [
-        OpDesc(opClass="SimdAdd"),
-        OpDesc(opClass="SimdAddAcc"),
-        OpDesc(opClass="SimdAlu"),
-        OpDesc(opClass="SimdCmp"),
-        OpDesc(opClass="SimdCvt"),
-        OpDesc(opClass="SimdMisc"),
-        OpDesc(opClass="SimdMult"),
-        OpDesc(opClass="SimdMultAcc"),
-        OpDesc(opClass="SimdMatMultAcc"),
-        OpDesc(opClass="SimdShift"),
-        OpDesc(opClass="SimdShiftAcc"),
-        OpDesc(opClass="SimdDiv"),
-        OpDesc(opClass="SimdSqrt"),
-        OpDesc(opClass="SimdFloatAdd"),
-        OpDesc(opClass="SimdFloatAlu"),
-        OpDesc(opClass="SimdFloatCmp"),
-        OpDesc(opClass="SimdFloatCvt"),
-        OpDesc(opClass="SimdFloatDiv"),
-        OpDesc(opClass="SimdFloatMisc"),
-        OpDesc(opClass="SimdFloatMult"),
-        OpDesc(opClass="SimdFloatMultAcc"),
-        OpDesc(opClass="SimdFloatMatMultAcc"),
-        OpDesc(opClass="SimdFloatSqrt"),
-        OpDesc(opClass="SimdReduceAdd"),
-        OpDesc(opClass="SimdReduceAlu"),
-        OpDesc(opClass="SimdReduceCmp"),
-        OpDesc(opClass="SimdFloatReduceAdd"),
-        OpDesc(opClass="SimdFloatReduceCmp"),
-        OpDesc(opClass="SimdExt"),
-        OpDesc(opClass="SimdFloatExt"),
-        OpDesc(opClass="SimdConfig"),
-        OpDesc(opClass="SimdDotProd"),
-        OpDesc(opClass="SimdAes"),
-        OpDesc(opClass="SimdAesMix"),
-        OpDesc(opClass="SimdSha1Hash"),
-        OpDesc(opClass="SimdSha1Hash2"),
-        OpDesc(opClass="SimdSha256Hash"),
-        OpDesc(opClass="SimdSha256Hash2"),
-        OpDesc(opClass="SimdShaSigma2"),
-        OpDesc(opClass="SimdShaSigma3"),
-        OpDesc(opClass="SimdSha3"),
-        OpDesc(opClass="SimdSm4e"),
-        OpDesc(opClass="SimdCrc"),
-        OpDesc(opClass="SimdBf16Add"),
-        OpDesc(opClass="SimdBf16Cmp"),
-        OpDesc(opClass="SimdBf16Cvt"),
-        OpDesc(opClass="SimdBf16DotProd"),
-        OpDesc(opClass="SimdBf16MatMultAcc"),
-        OpDesc(opClass="SimdBf16Mult"),
-        OpDesc(opClass="SimdBf16MultAcc"),
+        # Vector ALU → 3 cycles (Pipe6)
+        OpDesc(opClass="SimdAdd", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdAddAcc", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdAlu", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdCmp", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdCvt", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdMisc", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdShift", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdShiftAcc", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdExt", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatExt", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdConfig", opLat=3, pipelined=True),
+        # Vector Multiply/Accumulate → 5 cycles (Pipe7)
+        OpDesc(opClass="SimdMult", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdMultAcc", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdMatMultAcc", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdFloatMult", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdFloatMultAcc", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdFloatMatMultAcc", opLat=5, pipelined=True),
+        # Vector Div/Sqrt → not pipelined
+        OpDesc(opClass="SimdDiv", opLat=12, pipelined=False),
+        OpDesc(opClass="SimdSqrt", opLat=24, pipelined=False),
+        OpDesc(opClass="SimdFloatDiv", opLat=12, pipelined=False),
+        OpDesc(opClass="SimdFloatSqrt", opLat=24, pipelined=False),
+        # Vector FP ALU → 3 cycles
+        OpDesc(opClass="SimdFloatAdd", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatAlu", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatCmp", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatCvt", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatMisc", opLat=3, pipelined=True),
+        # Vector Reduce → 3 cycles
+        OpDesc(opClass="SimdReduceAdd", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdReduceAlu", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdReduceCmp", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatReduceAdd", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdFloatReduceCmp", opLat=3, pipelined=True),
+        # Crypto extensions → 3 cycles
+        OpDesc(opClass="SimdDotProd", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdAes", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdAesMix", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdSha1Hash", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdSha1Hash2", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdSha256Hash", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdSha256Hash2", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdShaSigma2", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdShaSigma3", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdSha3", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdSm4e", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdCrc", opLat=3, pipelined=True),
+        # BF16 → varies
+        OpDesc(opClass="SimdBf16Add", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdBf16Cmp", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdBf16Cvt", opLat=3, pipelined=True),
+        OpDesc(opClass="SimdBf16DotProd", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdBf16MatMultAcc", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdBf16Mult", opLat=5, pipelined=True),
+        OpDesc(opClass="SimdBf16MultAcc", opLat=5, pipelined=True),
     ]
     count = 4
 
 
 class Matrix_Unit(FUDesc):
+    # Pipe6/7: Matrix ops → 5 cycles, pipelined
     opList = [
-        OpDesc(opClass="Matrix"),
-        OpDesc(opClass="MatrixMov"),
-        OpDesc(opClass="MatrixOP"),
+        OpDesc(opClass="Matrix", opLat=5, pipelined=True),
+        OpDesc(opClass="MatrixMov", opLat=3, pipelined=True),
+        OpDesc(opClass="MatrixOP", opLat=5, pipelined=True),
     ]
     count = 1
 
 
 class System_Unit(FUDesc):
-    opList = [OpDesc(opClass="System")]
+    # Pipe4: LSU Special — FENCE/FENCE.I/CSRR* → 1 cycle
+    opList = [OpDesc(opClass="System", opLat=1, pipelined=True)]
     count = 1
 
 
 class PredALU(FUDesc):
-    opList = [OpDesc(opClass="SimdPredAlu")]
+    # Predicate ALU → 1 cycle, pipelined
+    opList = [OpDesc(opClass="SimdPredAlu", opLat=1, pipelined=True)]
     count = 1
 
 
 class ReadPort(FUDesc):
+    # Pipe3: LSU Load — variable latency (cache hit 1 cycle)
     opList = [
-        OpDesc(opClass="MemRead"),
-        OpDesc(opClass="FloatMemRead"),
-        OpDesc(opClass="SimdUnitStrideLoad"),
-        OpDesc(opClass="SimdUnitStrideMaskLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedLoad"),
-        OpDesc(opClass="SimdStridedLoad"),
-        OpDesc(opClass="SimdIndexedLoad"),
-        OpDesc(opClass="SimdUnitStrideFaultOnlyFirstLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad"),
-        OpDesc(opClass="SimdWholeRegisterLoad"),
-        OpDesc(opClass="SimdStrideSegmentedLoad"),
+        OpDesc(opClass="MemRead", opLat=1, pipelined=True),
+        OpDesc(opClass="FloatMemRead", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideMaskLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideSegmentedLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdStridedLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdIndexedLoad", opLat=1, pipelined=True),
+        OpDesc(
+            opClass="SimdUnitStrideFaultOnlyFirstLoad", opLat=1, pipelined=True
+        ),
+        OpDesc(
+            opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad",
+            opLat=1,
+            pipelined=True,
+        ),
+        OpDesc(opClass="SimdWholeRegisterLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdStrideSegmentedLoad", opLat=1, pipelined=True),
     ]
     count = 0
 
 
 class WritePort(FUDesc):
+    # Pipe5: LSU Store — 1-2 cycles, pipelined
     opList = [
-        OpDesc(opClass="MemWrite"),
-        OpDesc(opClass="FloatMemWrite"),
-        OpDesc(opClass="SimdUnitStrideStore"),
-        OpDesc(opClass="SimdUnitStrideMaskStore"),
-        OpDesc(opClass="SimdUnitStrideSegmentedStore"),
-        OpDesc(opClass="SimdStridedStore"),
-        OpDesc(opClass="SimdIndexedStore"),
-        OpDesc(opClass="SimdWholeRegisterStore"),
-        OpDesc(opClass="SimdStrideSegmentedStore"),
+        OpDesc(opClass="MemWrite", opLat=1, pipelined=True),
+        OpDesc(opClass="FloatMemWrite", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideMaskStore", opLat=1, pipelined=True),
+        OpDesc(
+            opClass="SimdUnitStrideSegmentedStore", opLat=1, pipelined=True
+        ),
+        OpDesc(opClass="SimdStridedStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdIndexedStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdWholeRegisterStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdStrideSegmentedStore", opLat=1, pipelined=True),
     ]
     count = 0
 
 
 class RdWrPort(FUDesc):
+    # Pipe3/Pipe5: LSU Load/Store — 1 cycle (pipelined), covers both read and write
     opList = [
-        OpDesc(opClass="MemRead"),
-        OpDesc(opClass="MemWrite"),
-        OpDesc(opClass="FloatMemRead"),
-        OpDesc(opClass="FloatMemWrite"),
-        OpDesc(opClass="SimdUnitStrideLoad"),
-        OpDesc(opClass="SimdUnitStrideStore"),
-        OpDesc(opClass="SimdUnitStrideMaskLoad"),
-        OpDesc(opClass="SimdUnitStrideMaskStore"),
-        OpDesc(opClass="SimdUnitStrideSegmentedLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedStore"),
-        OpDesc(opClass="SimdStridedLoad"),
-        OpDesc(opClass="SimdStridedStore"),
-        OpDesc(opClass="SimdIndexedLoad"),
-        OpDesc(opClass="SimdIndexedStore"),
-        OpDesc(opClass="SimdUnitStrideFaultOnlyFirstLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad"),
-        OpDesc(opClass="SimdWholeRegisterLoad"),
-        OpDesc(opClass="SimdWholeRegisterStore"),
-        OpDesc(opClass="SimdStrideSegmentedLoad"),
-        OpDesc(opClass="SimdStrideSegmentedStore"),
+        OpDesc(opClass="MemRead", opLat=1, pipelined=True),
+        OpDesc(opClass="MemWrite", opLat=1, pipelined=True),
+        OpDesc(opClass="FloatMemRead", opLat=1, pipelined=True),
+        OpDesc(opClass="FloatMemWrite", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideMaskLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideMaskStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdUnitStrideSegmentedLoad", opLat=1, pipelined=True),
+        OpDesc(
+            opClass="SimdUnitStrideSegmentedStore", opLat=1, pipelined=True
+        ),
+        OpDesc(opClass="SimdStridedLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdStridedStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdIndexedLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdIndexedStore", opLat=1, pipelined=True),
+        OpDesc(
+            opClass="SimdUnitStrideFaultOnlyFirstLoad", opLat=1, pipelined=True
+        ),
+        OpDesc(
+            opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad",
+            opLat=1,
+            pipelined=True,
+        ),
+        OpDesc(opClass="SimdWholeRegisterLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdWholeRegisterStore", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdStrideSegmentedLoad", opLat=1, pipelined=True),
+        OpDesc(opClass="SimdStrideSegmentedStore", opLat=1, pipelined=True),
     ]
     count = 4

@@ -52,8 +52,10 @@ class PMAChecker(BasePMAChecker):
     cxx_header = "arch/riscv/pma_checker.hh"
     cxx_class = "gem5::RiscvISA::PMAChecker"
 
+    # OpenC910: PMA checker implemented implicitly via BIU/CIU
     uncacheable = VectorParam.AddrRange([], "Uncacheable address ranges")
     misaligned = VectorParam.AddrRange(
         [],
-        "Address ranges support misaligned load/store to memory",
+        "Address ranges support misaligned load/store to memory. "
+        "OpenC910: Hardware supports misaligned access",
     )

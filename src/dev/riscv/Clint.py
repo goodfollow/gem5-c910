@@ -53,7 +53,11 @@ class Clint(BasicPioDevice):
     cxx_class = "gem5::Clint"
     int_pin = IntSinkPin("Pin to receive RTC signal")
     pio_size = Param.Addr(0xC000, "PIO Size")
-    num_threads = Param.Int("Number of threads in the system.")
+    num_threads = Param.Int(
+        1,
+        "Number of threads in the system. "
+        "OpenC910: MAX_HART_NUM=32 (最多 32 个 Hart), PLIC_HART_NUM = actual count",
+    )
     reset = ResetResponsePort("Reset")
     reset_mtimecmp = Param.Bool(
         False, "Change mtimecmp to `mtimecmp_reset_value` when reset"

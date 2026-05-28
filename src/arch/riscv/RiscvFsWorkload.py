@@ -60,13 +60,16 @@ class RiscvLinux(KernelWorkload):
     cxx_class = "gem5::RiscvISA::FsLinux"
     cxx_header = "arch/riscv/linux/fs_workload.hh"
 
+    # OpenC910: These are gem5 simulator-specific parameters,
+    # not part of the C910 RTL implementation
     dtb_filename = Param.String(
         "", "File that contains the Device Tree Blob. Don't use DTB if empty."
     )
     dtb_addr = Param.Addr(0x87E00000, "DTB address")
     semihosting = Param.RiscvSemihosting(
         NULL,
-        "Enable support for RISC-V semihosting by settings this parameter",
+        "Enable support for RISC-V semihosting by settings this parameter. "
+        "OpenC910: Not applicable (gem5 仿真器特性，RTL 无需实现)",
     )
 
     # gem5 event upon guest's kernel panic

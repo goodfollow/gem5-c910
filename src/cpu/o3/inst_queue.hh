@@ -79,6 +79,31 @@ class FUPool;
 class CPU;
 class IEW;
 
+/**
+ * Issue Queue types aligned with OpenC910 architecture.
+ * Each IQ type has dedicated entries and handles specific instruction types.
+ */
+enum class IQType {
+    AIQ0,           // Integer ALU queue 0 (11 entries)
+    AIQ1,           // Integer ALU queue 1 (11 entries, has MLA unit)
+    BIQ,            // Branch/Jump queue (12 entries)
+    LSIQ,           // Load/Store address queue (16 entries)
+    SDIQ,           // Store data queue (8 entries)
+    VIQ0,           // Vector ALU queue 0 (10 entries)
+    VIQ1,           // Vector ALU queue 1 (10 entries, has VFMAU)
+    VMB,            // Vector memory buffer queue (8 entries)
+    NUM_IQ_TYPES
+};
+
+inline const char*
+to_string(IQType type)
+{
+    static const char* names[] = {
+        "AIQ0", "AIQ1", "BIQ", "LSIQ", "SDIQ", "VIQ0", "VIQ1", "VMB"
+    };
+    return names[static_cast<int>(type)];
+}
+
 class IQUnit : public SimObject
 {
   public:
@@ -132,9 +157,18 @@ class IQUnit : public SimObject
         return _fuPool;
     }
 
+    IQType
+    iqType() const
+    {
+        return _iqType;
+    }
+
   private:
     /** IQ sharing policy for SMT. */
     SMTQueuePolicy iqPolicy;
+
+    /** The type of this IQ (AIQ0, AIQ1, BIQ, etc.). */
+    IQType _iqType;
 
     /** Number of Total Threads */
     ThreadID numThreads;
@@ -270,11 +304,35 @@ class InstructionQueue
     /** Returns if there are any ready instructions in the IQ. */
     bool hasReadyInsts();
 
+    /** Returns if there are ready IntDiv instructions waiting for a FU. */
+    bool hasReadyIntDiv();
+
     /** Find a compatible IQ (e.g. to insert the instruction) */
     IQUnit *findIQ(const DynInstPtr &inst);
 
+    /** Find an IQ of the given type that has free entries */
+    IQUnit *findIQByType(IQType type, ThreadID tid);
+
+    /** Returns whether or not the IQ is full for a specific instruction type. */
+    bool isFullByType(IQType type, ThreadID tid);
+
     /** Inserts a new instruction into the IQ. */
     void insert(const DynInstPtr &new_inst);
+
+    /** Inserts an instruction into a specific IQ type. */
+    bool insertToIQType(const DynInstPtr &new_inst, IQType type);
+
+    /** Round-robin counter accessor for AIQ load balancing */
+    int
+    getAIQRRCounter() const
+    {
+        return aiqRRCounter;
+    }
+    void
+    advanceAIQRRCounter()
+    {
+        aiqRRCounter = (aiqRRCounter + 1) % 2;
+    }
 
     /** Inserts a new, non-speculative instruction into the IQ. */
     void insertNonSpec(const DynInstPtr &new_inst);
@@ -521,6 +579,9 @@ class InstructionQueue
      */
     Cycles commitToIEWDelay;
 
+    /** Round-robin selector for AIQ0/AIQ1 load balancing */
+    int aiqRRCounter;
+
     /** The sequence number of the squashed instruction. */
     InstSeqNum squashedSeqNum[MaxThreads];
 
@@ -613,6 +674,13 @@ class InstructionQueue
         statistics::Vector fuBusy;
         /** Number of times the FU was busy per instruction issued. */
         statistics::Formula fuBusyRate;
+
+        /** C910 forwarding path counters. */
+        statistics::Scalar ex1ForwardInsts;   // EX1 combinational forwarding (opLat=1)
+        statistics::Scalar ex2WritebackInsts; // EX2 clock-edge writeback (opLat>1)
+        /** EX2 latency histogram (buckets: 1-32 cycles, width=1). */
+        statistics::Distribution ex2LatencyHist;
+        statistics::Scalar totalWakeDependents; // Total dependents woken
     } iqStats;
 
    public:

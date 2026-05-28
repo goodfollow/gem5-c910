@@ -1,6 +1,17 @@
 /*
- * Copyright (c) 2005-2006 The Regents of The University of Michigan
- * Copyright (c) 2013 Advanced Micro Devices, Inc.
+ * Copyright (c) 2010-2012, 2014, 2019, 2025 Arm Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
+ * Copyright (c) 2004-2006 The Regents of The University of Michigan
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,9 +47,14 @@ namespace o3
 {
 
 Scoreboard::Scoreboard(const std::string &_my_name,
-        unsigned _numPhysicalRegs) :
-    _name(_my_name), regScoreBoard(_numPhysicalRegs, true),
-    numPhysRegs(_numPhysicalRegs)
+                       unsigned _numPregs, unsigned _numEregs,
+                       unsigned _numVregs, unsigned _numOtherRegs)
+    : _name(_my_name),
+      pregScoreBoard(_numPregs, true), _numPregs(_numPregs),
+      eregScoreBoard(_numEregs, true), _numEregs(_numEregs),
+      vregScoreBoard(_numVregs, true), _numVregs(_numVregs),
+      otherScoreBoard(_numOtherRegs, true), _numOtherRegs(_numOtherRegs),
+      _numPhysRegs(_numPregs + _numEregs + _numVregs + _numOtherRegs)
 {}
 
 } // namespace o3

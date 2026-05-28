@@ -94,30 +94,29 @@ class RiscvISA(BaseISA):
 
     riscv_type = Param.RiscvType("RV64", "RV32 or RV64")
 
-    enable_rvv = Param.Bool(True, "Enable vector extension")
+    enable_rvv = Param.Bool(False, "Enable vector extension")
     vlen = Param.RiscvVectorLength(
-        256,
-        "Length of each vector register in bits. \
-        VLEN in Ch. 2 of RISC-V vector spec",
+        64,
+        "Length of each vector register in bits. "
+        "VLEN in Ch. 2 of RISC-V vector spec. "
+        "OpenC910: VEC_WIDTH=63 (non-standard, closest power of 2 is 64)",
     )
     elen = Param.RiscvVectorElementLength(
         64,
-        "Length of each vector element in bits. \
-        ELEN in Ch. 2 of RISC-V vector spec",
+        "Length of each vector element in bits. "
+        "ELEN in Ch. 2 of RISC-V vector spec. "
+        "OpenC910: FPR_WIDTH=63 (non-standard, closest power of 2 is 64)",
     )
     privilege_mode_set = Param.PrivilegeModeSet(
-        "MSU",  # set MHSU to enable hypervisor (H-extension)
-        # No timing CPUs are supported in MHSU currently
-        # *ONLY THE ATOMIC CPU / ATOMIC MEMORY* is supported
-        # PTW does not yet implement timing walks with H extension on
-        # (P.S.: look at the change for MIDELEG in isa.cc:readMiscReg
-        # if working with old bbl bootloader)
-        "The combination of privilege modes \
-        in Privilege Levels section of RISC-V privileged spec",
+        "MSU",  # OpenC910: M/S/U three privilege modes, no hypervisor
+        "The combination of privilege modes "
+        "in Privilege Levels section of RISC-V privileged spec. "
+        "OpenC910: MSU (Machine/Supervisor/User) without hypervisor",
     )
 
-    enable_Zicbom_fs = Param.Bool(True, "Enable Zicbom extension in FS mode")
-    enable_Zicboz_fs = Param.Bool(True, "Enable Zicboz extension in FS mode")
+    # OpenC910: No Zicbom/Zicboz support detected
+    enable_Zicbom_fs = Param.Bool(False, "Enable Zicbom extension in FS mode")
+    enable_Zicboz_fs = Param.Bool(False, "Enable Zicboz extension in FS mode")
     enable_Zcd = Param.Bool(
         True,
         "Enable Zcd extensions. "
@@ -136,7 +135,8 @@ class RiscvISA(BaseISA):
         "is not considered.\n"
         "If wfi_resume_on_pending is set to False, the hart will only "
         "resume the execution when an locally enabled interrupt becomes "
-        "pending.",
+        "pending.\n"
+        "OpenC910: This feature is not implemented",
     )
 
     def get_isa_string(self):

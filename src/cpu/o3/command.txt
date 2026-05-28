@@ -1,0 +1,3 @@
+build/RISCV/gem5.opt configs/deprecated/example/se.py -c hello --cpu-type=O3CPU --caches -P "system.cpu[0].numPhysFloatRegs=256"
+
+build/RISCV/gem5.opt configs/deprecated/example/se.py -c baremetal --maxinsts=10000 --cpu-type=O3CPU --caches -P "system.cpu[0].numPhysFloatRegs=256"
